@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "model-courier-provider-ultralytics"
-version = "0.1.0.dev0"
+version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["model-courier>=0.1.0.dev0"]
+dependencies = ["model-courier>=0.1.0"]
 
 [project.optional-dependencies]
 runtime = ["ultralytics>=8.3,<9"]

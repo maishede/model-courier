@@ -1,5 +1,8 @@
 # ModelCourier
 
+[![CI](https://github.com/maishede/model-courier/actions/workflows/ci.yml/badge.svg)](https://github.com/maishede/model-courier/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ModelCourier is an outbound AI task relay for Raspberry Pi, ESP32, and other
 small devices. A device sends an HTTPS task to a small public control plane;
 your local GPU Worker makes an outbound connection, runs a local model, and
@@ -10,6 +13,12 @@ The first release is intentionally single-owner and self-hosted. The control
 plane uses FastAPI, SQLite WAL, and local artifact files, so a 2C2G / 40 GB
 server does not need PostgreSQL, Redis, RabbitMQ, or a cloud inference API.
 Heavy model dependencies stay in optional Worker-side packages.
+
+ModelCourier is useful when an edge device can reach the public internet but a
+GPU workstation cannot accept inbound connections. It turns that network
+constraint into a durable task boundary: devices submit versioned jobs, a
+local Worker pulls only matching capabilities, and the device retrieves a
+normalized result later.
 
 ## Repository layout
 
@@ -153,3 +162,7 @@ python -m compileall -q src packages
 This project is an infrastructure component, not a hosted inference service.
 You remain responsible for model licenses, uploaded data retention, TLS, token
 rotation, and access control at the deployment boundary.
+
+## License
+
+ModelCourier is released under the [MIT License](LICENSE).

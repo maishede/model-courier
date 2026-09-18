@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,8 @@ import httpx
 from model_courier.contracts import TaskEnvelope
 
 from .factory import ProviderFactory
-from .provider import ExecutionContext, ProviderError
+from .process_runner import ProcessRunner
+from .provider import ProviderError
 
 
 @dataclass(frozen=True)
@@ -37,9 +37,11 @@ class WorkerRuntime:
         config: WorkerConfig,
         factory: ProviderFactory,
         client: httpx.Client | None = None,
+        process_runner: ProcessRunner | None = None,
     ) -> None:
         self.config = config
         self.factory = factory
+        self.process_runner = process_runner or ProcessRunner()
         self.client = client or httpx.Client(
             base_url=config.base_url,
             headers={"Authorization": f"Bearer {config.token}"},
@@ -67,12 +69,13 @@ class WorkerRuntime:
             provider.validate(task)
             with tempfile.TemporaryDirectory(prefix="model-courier-") as temp_dir:
                 input_paths = self._download_inputs(task_id, Path(temp_dir))
-                context = ExecutionContext(
-                    task_id=task_id,
-                    deadline=time.time() + self.config.request_timeout,
-                    input_paths=input_paths,
+                result = self.process_runner.execute(
+                    provider,
+                    task,
+                    task_id,
+                    input_paths,
+                    self.config.request_timeout,
                 )
-                result = provider.execute(task, context)
             self.client.put(
                 f"/v1/workers/tasks/{task_id}/result",
                 params=lease_request,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-from collections.abc import Iterable
+from collections.abc import AsyncIterable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,6 +77,36 @@ class ArtifactStore:
         try:
             with handle.temporary_path.open("wb") as output:
                 for chunk in chunks:
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > handle.declared_size:
+                        raise ArtifactError("upload is larger than declared size")
+                    digest.update(chunk)
+                    output.write(chunk)
+            if size != handle.declared_size:
+                raise ArtifactError("upload size does not match declaration")
+            os.replace(handle.temporary_path, handle.path)
+        except Exception:
+            handle.temporary_path.unlink(missing_ok=True)
+            handle.path.unlink(missing_ok=True)
+            raise
+        return ArtifactRef(
+            artifact_id=handle.artifact_id,
+            name=handle.name,
+            mime=handle.mime,
+            size_bytes=size,
+            sha256=digest.hexdigest(),
+        )
+
+    async def write_async_stream(
+        self, handle: UploadHandle, chunks: AsyncIterable[bytes]
+    ) -> ArtifactRef:
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with handle.temporary_path.open("wb") as output:
+                async for chunk in chunks:
                     if not chunk:
                         continue
                     size += len(chunk)

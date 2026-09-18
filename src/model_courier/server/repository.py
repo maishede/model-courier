@@ -142,6 +142,66 @@ class TaskRepository:
                 (worker_id, owner_id, token_hash, capabilities_json, now, now),
             )
 
+    def update_worker_capabilities(
+        self,
+        worker_id: str,
+        capabilities: Iterable[CapabilityManifest],
+        now: float | None = None,
+    ) -> None:
+        now = _now() if now is None else now
+        capabilities_json = json.dumps(
+            [capability.model_dump(mode="json") for capability in capabilities],
+            sort_keys=True,
+        )
+        with self.database.connection() as connection:
+            updated = connection.execute(
+                """
+                UPDATE workers
+                SET capabilities_json = ?, last_seen_at = ?
+                WHERE id = ? AND revoked_at IS NULL
+                """,
+                (capabilities_json, now, worker_id),
+            )
+            if updated.rowcount != 1:
+                raise NotFoundError("worker not found")
+
+    def worker_capabilities(self, worker_id: str) -> list[CapabilityManifest]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT capabilities_json FROM workers WHERE id = ? AND revoked_at IS NULL",
+                (worker_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("worker not found")
+        return [
+            CapabilityManifest.model_validate(item)
+            for item in json.loads(row["capabilities_json"])
+        ]
+
+    def get_task(self, owner_id: str, task_id: str) -> TaskRecord:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ? AND owner_id = ?", (task_id, owner_id)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("task not found")
+        return _row_to_task(row)
+
+    def input_artifact_path(self, owner_id: str, task_id: str) -> str:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT artifacts.path FROM artifacts
+                JOIN tasks ON tasks.id = artifacts.task_id
+                WHERE tasks.id = ? AND tasks.owner_id = ? AND artifacts.kind = 'input'
+                ORDER BY artifacts.created_at ASC LIMIT 1
+                """,
+                (task_id, owner_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("input artifact not found")
+        return row["path"]
+
     def create_uploading(
         self,
         owner_id: str,
@@ -211,6 +271,7 @@ class TaskRepository:
         task_id: str,
         input_artifact: ArtifactRef,
         request_digest: str,
+        artifact_path: str | None = None,
         now: float | None = None,
     ) -> TaskRecord:
         now = _now() if now is None else now
@@ -251,7 +312,7 @@ class TaskRepository:
                     input_artifact.mime,
                     input_artifact.size_bytes,
                     input_artifact.sha256,
-                    input_artifact.artifact_id or artifact_id,
+                    artifact_path or input_artifact.artifact_id or artifact_id,
                     row["expires_at"],
                     now,
                 ),

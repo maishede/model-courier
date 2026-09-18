@@ -2,6 +2,7 @@
 
 状态：待用户审阅
 日期：2026-09-18
+审查：已完成第一轮架构自审；以下默认值是待实现验证的设计目标，不是性能承诺。
 
 ## 1. 项目定位
 
@@ -107,7 +108,11 @@ ModelCourier 的稳定边界不是某一个模型，而是四层协议：
 - `text.generate.v1`
 - `embedding.create.v1`
 
-设备只依赖任务类型和 Schema。任务可以指定偏好的 Provider，也可以只指定任务类型，由 Worker 根据能力和本地策略选择 Provider。
+设备只依赖任务类型和 Schema。任务可以通过 `requires.provider` 和 `requires.model` 指定硬约束，也可以省略；指定后不得静默降级到其他实现。服务端按 Owner、任务类型、格式和硬约束匹配能力，再将具体 `capability_id` 固定到本次租约。Worker 只执行该绑定；更换实现需重新领取。
+
+任务协议版本、Provider 插件接口版本和模型版本分别管理。`task_type` 中的 `.v1` 是任务 Schema 版本的唯一来源；协议外壳另有 `protocol_version`。新增任务类型通过管理员安装 Schema 注册包完成，不能由设备提交任意 Schema；服务端校验标准输入和结果，Provider 校验自己的命名空间选项。
+
+标准音频结果包括文本、语言及可选分段，时间戳单位为秒。标准检测结果包括原图尺寸、标签、置信度及基于原图的像素坐标 `xyxy`。插件负责转换模型原生输出；可选字段缺失用明确的可选语义表达，不伪造时间戳或置信度。
 
 ### 4.2 Provider Adapter 与 Factory
 
@@ -131,7 +136,11 @@ audio.transcribe.v1 + funasr         -> FunASRProvider
 vision.detect.v1  + ultralytics     -> UltralyticsProvider
 ```
 
-真实 Provider 以可选插件包存在，核心仓库至少包含接口、Schema、Mock Provider 和插件开发示例。插件可以通过 Python entry point 或明确的本地插件目录注册。
+真实 Provider 以可选插件包存在，核心仓库至少包含接口、Schema、Mock Provider 和插件开发示例。首版通过 `model_courier.providers` Python entry point 注册工厂，并由本地配置白名单启用。设备请求不能安装包、指定 Python 导入路径、模型下载 URL 或本地文件路径。
+
+工厂创建 Provider 实例，Adapter 负责统一语义；不为每个模型增加独立网络协议。后续可增加本地 HTTP/gRPC 模型服务 Adapter。Worker Runtime 负责下载、心跳、结果上传和重试，Provider 仅接收本地输入与执行上下文。上下文提供截止时间、取消信号和进度报告。
+
+推理在独立子进程中执行，避免阻塞心跳；首版每台 Worker 默认并发为 1。模型懒加载并在切换时释放，失联、超时或取消后先请求停止，必要时终止子进程。插件依赖冲突可以通过不同虚拟环境运行多个 Worker 进程解决，各自声明能力；不得假设所有模型框架能共存。
 
 建议的包名：
 
@@ -165,27 +174,36 @@ Worker 注册时上报能力、Provider、模型、支持的输入格式和资�
 任务状态：
 
 ```text
-queued → leased → running → succeeded
-                         └→ failed
-queued / leased → expired
+uploading → queued → leased → running → succeeded
+                    │          ├→ failed
+                    └──────────┴→ queued（可重试，延迟领取）
+所有非终态 → expired / canceled
 ```
 
+- `uploading`：任务已创建，输入尚未完整验证，不可领取。
 - `queued`：等待匹配的 Worker。
 - `leased`：Worker 已领取但尚未确认开始执行。
 - `running`：Worker 已开始执行并持续发送心跳。
 - `succeeded`：结果已上传且校验通过。
-- `failed`：不可重试的 Provider 或输入错误，保留规范化错误信息。
-- `expired`：超过任务 TTL 或结果保留期限。
+- `failed`：不可重试错误或尝试次数耗尽，保留规范化错误信息。
+- `expired`：超过执行截止时间，不能再领取或提交结果。
+- `canceled`：设备取消任务，后续心跳与完成请求被拒绝。
 
-每次领取任务都会写入 `lease_owner`、`lease_until` 和 `attempt`。租约过期后，调度器可以安全回收任务。网络重试使用幂等键和结果校验，避免重复任务产生多个有效结果。
+成功、失败、过期和取消都是终态。结果过期不改变成功状态，而是标记 `result_available=false`，下载返回 410。`waiting_for_worker` 是排队原因，不是独立状态；Worker 心跳过期后视为离线。
+
+每次领取通过短写事务完成，并生成递增 `lease_generation` 和随机 `lease_token`。心跳、开始、失败、上传和完成请求必须匹配当前 Owner、Worker、代次和有效租约。旧 Worker 的迟到请求返回 409，不能覆盖新结果。任务截止时间和租约均以服务器时间为准；过期、取消、完成通过条件更新竞争，只有一个终态能生效。
+
+系统保证至少一次执行、最多一个有效结果发布，不保证模型只执行一次。创建幂等键按 `(owner_id, device_id, idempotency_key)` 唯一，并绑定规范化请求摘要；相同请求返回原任务，不同请求返回 409。完成响应丢失时，当前成功尝试的相同结果摘要可重放并返回成功；不同摘要或旧代次不得写入。Provider 首版不承担付款、设备动作等不可重复副作用。
 
 默认策略：
 
 - 任务默认 TTL：24 小时。
 - 领取租约：10 分钟，可由 Worker 心跳续租。
-- 网络错误和 Worker 崩溃：自动重试。
-- 输入格式错误、Provider 配置错误：直接失败并返回可读错误。
-- 结果和输入文件的保留时间可配置。
+- 心跳每 30 秒发送，续租不能超过任务截止时间；长轮询最长 25 秒，等待时不得持有数据库事务。
+- 网络错误和 Worker 崩溃：在截止时间内最多领取 3 次，退避 5 秒、30 秒；次数耗尽后失败。每次执行最长默认 10 分钟，允许管理员调整，心跳不延长执行时限。
+- 输入格式错误直接失败；Provider 配置错误先将该能力标记为不可用，任务可改派其他匹配 Worker，仍受重试次数和截止时间约束。
+- TTL 从创建时起计算，默认 24 小时、最大 7 天；未完成上传 1 小时后过期。设备取消后停止接收结果，Worker 在下次心跳时停止执行。
+- 成功提交后删除输入；失败、过期、取消的输入最多保留 24 小时。结果保留 7 天，元数据和幂等记录保留 30 天，日志轮转。清理失败可重试。
 
 ## 6. 数据与文件模型
 
@@ -204,7 +222,7 @@ SQLite 只保存元数据，至少包括：
 - `owner_id`
 - `device_id`
 - `task_type`
-- `schema_version`
+- `protocol_version`
 - `requested_provider`
 - `status`
 - `idempotency_key`
@@ -212,9 +230,16 @@ SQLite 只保存元数据，至少包括：
 - `lease_owner`
 - `lease_until`
 - `attempt`
+- `request_digest`、`requires`、`bound_capability_id`
+- `lease_generation`、`lease_token_hash`、`next_attempt_at`
+- `execution_deadline`、`result_available`、`result_expires_at`
 - `created_at`、`updated_at`
 
 文件只通过 artifact 引用关联，数据库不保存二进制内容。每个 artifact 记录 MIME 类型、字节数、SHA-256、路径、来源和过期时间。
+
+创建时声明输入大小并预留磁盘配额，输入上传采用原始二进制流而非 base64。写入唯一临时文件，服务端计算摘要、核对大小后原子重命名，再记录完整 artifact；只有 `submit` 校验通过才入队。首版中断后整文件重传，不承诺分片续传。同一任务禁止并行写入；入队后输入不可修改。
+
+结果先按任务和租约代次上传暂存，再以完成请求发布清单；服务端确认文件完整、结果 Schema 正确且租约有效后，事务提交成功状态。文件系统和 SQLite 不能做跨系统原子事务，因此启动和定期清理均需对账：回收孤立暂存文件，禁止发布缺失文件的结果。清理通过删除标记与引用检查执行，保护有效租约的输入和正在传输的文件。
 
 ## 7. API 边界
 
@@ -226,6 +251,7 @@ PUT    /v1/tasks/{task_id}/input
 POST   /v1/tasks/{task_id}/submit
 GET    /v1/tasks/{task_id}
 GET    /v1/tasks/{task_id}/result
+POST   /v1/tasks/{task_id}/cancel
 ```
 
 Worker API 的逻辑流程：
@@ -234,12 +260,16 @@ Worker API 的逻辑流程：
 POST   /v1/workers/register
 POST   /v1/workers/poll
 POST   /v1/workers/tasks/{task_id}/heartbeat
+POST   /v1/workers/tasks/{task_id}/start
+POST   /v1/workers/tasks/{task_id}/fail
 GET    /v1/workers/tasks/{task_id}/input
 PUT    /v1/workers/tasks/{task_id}/result
 POST   /v1/workers/tasks/{task_id}/complete
 ```
 
-具体 HTTP 状态码、认证头、错误 Schema 和分页策略在实现计划中固定，接口必须带 `/v1` 版本前缀。
+接口带 `/v1` 前缀，认证使用 `Authorization: Bearer`。密钥通过服务器本地管理 CLI 创建、轮换和撤销；Worker register 是已授权 Worker 的会话建立，不允许匿名自助注册。Owner、设备与 Worker 身份从密钥解析，不能由请求体指定权限范围。所有任务和 artifact 端点均校验权限。
+
+创建返回 201，幂等重放返回 200，提交返回 202，无可领取任务返回 204。非法状态或租约返回 409，超限文件返回 413，Schema 错误返回 422，配额或请求频率限制返回 429，临时容量不足返回 503；重试响应携带 `Retry-After`。错误统一为 `code/message/retryable/request_id`，不得泄露文件路径、密钥或完整推理输入。结果未就绪返回 409，已清理返回 410。
 
 ## 8. 安全与资源保护
 
@@ -255,6 +285,12 @@ POST   /v1/workers/tasks/{task_id}/complete
 
 2C2G 服务器只承担控制平面和小规模文件中转，不承诺高并发推理服务。未来需要多租户、对象存储或高并发时，再替换存储和调度实现。
 
+首版资源默认值：图片最大 8 MiB，音频最大 32 MiB、时长最大 120 秒（解码后由 Worker 复核），单任务结果总量最大 16 MiB。每设备最多 10 个非终态任务，全实例最多 100 个非终态任务。文件总预算 10 GiB，包含输入、暂存、输出和预留量；磁盘可用空间不足 5 GiB 时拒绝新任务。创建时同时预留输入声明大小和结果预算，上传时按实际字节再次检查，避免并发绕过配额。
+
+控制平面采用一个 API 进程、SQLite 本地磁盘及短事务；不在网络共享盘运行 SQLite。忙等待设定上限，超时返回可重试错误；启用外键、领取索引和 WAL checkpoint。备份使用 SQLite 在线备份或停服一致性快照，不能单独复制正在写入的主数据库文件。反向代理与应用的流式上传配置需实测，避免两层缓冲重复占盘。初始全局文件传输并发上限为 4；2C2G 的实际可用容量通过部署压测确定。
+
+首版只支持异步图片和短音频任务，不适合实时语音对话、连续视频或机械运动闭环。Worker 不在线时不可承诺即时响应。媒体会经过公网服务器，HTTPS 不等于端到端加密；本地推理仍有电力和网络成本。
+
 ## 9. 首版范围
 
 首版交付：
@@ -267,7 +303,7 @@ POST   /v1/workers/tasks/{task_id}/complete
 6. Provider 插件接口、Factory 和能力清单示例。
 7. 本地部署文档、协议文档和最小安全配置。
 
-Faster-Whisper、FunASR 和 Ultralytics 作为可选 Provider 接入，不进入服务端核心耦合层。首个真实 Provider 可以在核心协议验证完成后独立加入。
+交付分两步：M0 验证 Mock 的协议与可靠性；M1 才是可用首版，需要一个真实视觉插件和两个可替换的语音插件。以 Ultralytics、Faster-Whisper、FunASR 为候选，在核实依赖和模型许可证、硬件兼容性后确定可发布组合。插件独立安装，不成为核心必需依赖。交付至少一个 ESP32 图片示例和一个树莓派音频示例；模拟验证与实机验证分别记录，硬件未验证时不得宣称完成。模型权重不随核心仓库分发。
 
 首版不包含：
 
@@ -287,6 +323,13 @@ Faster-Whisper、FunASR 和 Ultralytics 作为可选 Provider 接入，不进入
 - 将 Provider 从 Mock 替换为另一个实现时，服务器 API 和设备端协议无需修改。
 - 文档能够让第三方根据接口实现新的 Provider。
 - 在 2C2G 服务器上运行控制平面时，上传、排队、轮询和结果下载可用。
+- 输入未上传或摘要不符时，Worker 不能领取任务；并发领取同一任务只有一个当前有效租约。
+- 旧 Worker 在重新分配、取消或超时后回传结果必须失败；完成响应丢失后可安全重放。
+- 推理占满 GPU 或阻塞 Provider 时，Runtime 仍能续租、响应取消并执行超时终止。
+- 重试次数耗尽、能力失效和无匹配 Worker 均有可观察状态，不产生无限重试。
+- 两个设备和两个 Owner 的权限测试覆盖查询、输入、结果、租约及 artifact，禁止跨范围访问。
+- 并发上传、磁盘不足、提交中崩溃和清理重启测试不发布半成品、不突破预留配额。
+- M1 用真实图片和音频完成端到端处理，并在不修改设备请求和服务器代码的情况下切换两种语音 Provider。
 
 ## 11. 后续扩展路径
 
@@ -296,4 +339,4 @@ Faster-Whisper、FunASR 和 Ultralytics 作为可选 Provider 接入，不进入
 - 增加 S3 兼容对象存储适配器。
 - 增加 Provider 健康检查、模型预热和显存调度。
 - 增加加密 artifact、端到端传输策略和审计日志。
-- 增加更多语言 SDK 和 ESP32 原生客户端示例。
+- 增加更多语言 SDK 和嵌入式设备示例。

@@ -546,6 +546,32 @@ class TaskRepository:
         assert row is not None
         return _row_to_task(row)
 
+    def remove_input_artifacts(self, owner_id: str, task_id: str) -> list[str]:
+        """Remove successful-task input metadata and return stored relative paths."""
+
+        with self.database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT status FROM tasks WHERE id = ? AND owner_id = ?",
+                (task_id, owner_id),
+            ).fetchone()
+            if task is None:
+                connection.rollback()
+                raise NotFoundError("task not found")
+            if task["status"] != "succeeded":
+                connection.rollback()
+                raise ConflictError("only successful tasks can release input artifacts")
+            rows = connection.execute(
+                "SELECT path FROM artifacts WHERE task_id = ? AND kind = 'input'",
+                (task_id,),
+            ).fetchall()
+            connection.execute(
+                "DELETE FROM artifacts WHERE task_id = ? AND kind = 'input'",
+                (task_id,),
+            )
+            connection.commit()
+        return [row["path"] for row in rows]
+
     def requeue_expired(self, now: float | None = None) -> int:
         now = _now() if now is None else now
         changed = 0

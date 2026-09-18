@@ -18,7 +18,10 @@ def cleanup_expired(
             "SELECT id, path FROM artifacts WHERE expires_at <= ? OR published = 0",
             (now,),
         ).fetchall()
-    report = store.delete_expired(Path(row["path"]) for row in rows)
+    report = store.delete_expired(
+        Path(row["path"]) if Path(row["path"]).is_absolute() else store.root / row["path"]
+        for row in rows
+    )
     with database.connection() as connection:
         connection.execute(
             "DELETE FROM artifacts WHERE expires_at <= ? OR published = 0", (now,)

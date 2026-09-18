@@ -72,7 +72,7 @@ print(worker_token)
 Install the SDK beside the core package during development:
 
 ```bash
-python -m pip install -e packages/sdk-python
+python -m pip install -e . -e packages/sdk-python
 ```
 
 ```python

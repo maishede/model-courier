@@ -6,11 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from model_courier.contracts import ArtifactRef, CapabilityManifest, TaskEnvelope, TaskRequirements
+from model_courier.contracts import (
+    ArtifactRef,
+    CapabilityManifest,
+    ProviderResult,
+    TaskEnvelope,
+    TaskRequirements,
+)
 from model_courier.server.db import Database
 from model_courier.server.repository import (
     ConflictError,
     LeaseConflictError,
+    NotFoundError,
     TaskRepository,
 )
 
@@ -159,3 +166,25 @@ def test_idempotency_conflict_is_rejected(tmp_path: Path) -> None:
         repo.create_uploading("owner-1", "device-1", envelope, "d" * 64, now=1001)
 
     assert first.status == "queued"
+
+
+def test_successful_task_releases_input_artifact_metadata(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    task = make_task(repo, key="release-input")
+    capability = repo.worker_capabilities("worker-1")[0]
+    lease = repo.claim_next("worker-1", [capability], now=1001)
+    assert lease is not None
+    repo.start(lease, now=1002)
+    repo.publish_result(
+        lease,
+        ProviderResult(
+            schema_version="audio.transcribe.v1",
+            json={"text": "ok"},
+            result_digest="0" * 64,
+        ),
+        now=1003,
+    )
+
+    assert repo.remove_input_artifacts("owner-1", task.id) == ["input-1"]
+    with pytest.raises(NotFoundError):
+        repo.input_artifact_path("owner-1", task.id)

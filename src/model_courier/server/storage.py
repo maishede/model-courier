@@ -137,6 +137,15 @@ class ArtifactStore:
             raise ArtifactError("artifact file is not uniquely present")
         return matches[0]
 
+    def remove_relative(self, relative_path: str) -> None:
+        """Remove a stored relative path while enforcing the artifact root boundary."""
+
+        path = (self.root / relative_path).resolve()
+        root = self.root.resolve()
+        if root not in path.parents or not path.is_file():
+            return
+        path.unlink(missing_ok=True)
+
     def publish_result(
         self,
         task_id: str,

@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install core test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Check formatting and lint
+        run: ruff check src tests packages examples
+      - name: Compile Python sources
+        run: python -m compileall -q src packages examples

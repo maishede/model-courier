@@ -136,6 +136,9 @@ def publish_worker_result(
         task = state.repository.publish_result(
             _lease_from_request(lease_request, principal, task_id), result
         )
+        input_paths = state.repository.remove_input_artifacts(principal.owner_id, task_id)
+        for input_path in input_paths:
+            state.storage.remove_relative(input_path)
     except Exception as exc:
         raise map_repository_error(exc) from exc
     return {"task_id": task.id, "status": task.status}

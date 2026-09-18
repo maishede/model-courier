@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ class WorkerConfig:
     token: str
     poll_seconds: int = 25
     request_timeout: float = 30.0
+    execution_timeout: float = 600.0
+    heartbeat_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,13 @@ class WorkerRuntime:
         ).raise_for_status()
         capability_id = lease["capability_id"]
         provider = self.factory.create(capability_id)
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(task_id, lease_request, heartbeat_stop),
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             provider.validate(task)
             with tempfile.TemporaryDirectory(prefix="model-courier-") as temp_dir:
@@ -74,7 +84,7 @@ class WorkerRuntime:
                     task,
                     task_id,
                     input_paths,
-                    self.config.request_timeout,
+                    self.config.execution_timeout,
                 )
             self.client.put(
                 f"/v1/workers/tasks/{task_id}/result",
@@ -107,13 +117,48 @@ class WorkerRuntime:
             ).raise_for_status()
             return RunOutcome("failed", task_id=task_id, message=str(exc))
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
             provider.close()
 
+    def register(self) -> None:
+        """Publish the capabilities currently installed in this Worker."""
+
+        response = self.client.post(
+            "/v1/workers/register",
+            json={
+                "capabilities": [
+                    capability.model_dump(mode="json")
+                    for capability in self.factory.capabilities()
+                ]
+            },
+        )
+        response.raise_for_status()
+
     def run_forever(self, stop_event: Any) -> None:
+        self.register()
         while not stop_event.is_set():
             outcome = self.run_once()
             if outcome.status == "idle":
-                stop_event.wait(1.0)
+                stop_event.wait(min(1.0, self.config.poll_seconds))
+
+    def _heartbeat_loop(
+        self,
+        task_id: str,
+        lease_request: dict[str, int | str],
+        stop_event: threading.Event,
+    ) -> None:
+        while not stop_event.wait(self.config.heartbeat_seconds):
+            try:
+                self.client.post(
+                    f"/v1/workers/tasks/{task_id}/heartbeat",
+                    json=lease_request,
+                ).raise_for_status()
+            except Exception:
+                # The execution result will be rejected if the lease is no longer
+                # current; avoid turning a transient heartbeat error into a second
+                # result publication from a background thread.
+                return
 
     def _download_inputs(self, task_id: str, directory: Path) -> list[Path]:
         response = self.client.get(f"/v1/workers/tasks/{task_id}/input")

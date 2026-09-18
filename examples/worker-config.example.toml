@@ -1,0 +1,9 @@
+base_url = "https://relay.example.com"
+token = "replace-with-a-worker-token"
+poll_seconds = 25
+request_timeout = 30.0
+execution_timeout = 600.0
+heartbeat_seconds = 30.0
+
+# Install one or more optional provider packages in this Worker environment.
+# Provider capabilities are discovered from the model_courier.providers entry point.

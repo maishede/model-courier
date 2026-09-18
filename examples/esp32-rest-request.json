@@ -1,0 +1,36 @@
+{
+  "description": "ESP32-compatible request sequence; send the envelope first, then raw bytes.",
+  "create": {
+    "method": "POST",
+    "path": "/v1/tasks",
+    "headers": {
+      "Authorization": "Bearer DEVICE_TOKEN",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "protocol_version": "1",
+      "task_type": "vision.detect.v1",
+      "input_artifacts": [
+        {"name": "frame.jpg", "mime": "image/jpeg", "size_bytes": 12345}
+      ],
+      "options": {},
+      "requires": {},
+      "idempotency_key": "esp32-cam:000001",
+      "ttl_seconds": 86400
+    }
+  },
+  "upload": {
+    "method": "PUT",
+    "path": "/v1/tasks/{task_id}/input?name=frame.jpg&mime=image%2Fjpeg&size_bytes=12345",
+    "headers": {
+      "Authorization": "Bearer DEVICE_TOKEN",
+      "Content-Type": "image/jpeg"
+    },
+    "body": "raw JPEG bytes"
+  },
+  "poll": {
+    "method": "GET",
+    "path": "/v1/tasks/{task_id}",
+    "headers": {"Authorization": "Bearer DEVICE_TOKEN"}
+  }
+}

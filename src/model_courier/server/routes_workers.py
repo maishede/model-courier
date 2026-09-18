@@ -26,6 +26,7 @@ def _lease_from_request(request: LeaseRequest, principal, task_id: str) -> Lease
         lease_generation=request.lease_generation,
         lease_token=request.lease_token,
         lease_until=0,
+        capability_id="",
         request_json="",
     )
 
@@ -66,6 +67,7 @@ async def poll_worker(
                         "lease_generation": lease.lease_generation,
                         "lease_token": lease.lease_token,
                         "lease_until": lease.lease_until,
+                        "capability_id": lease.capability_id,
                         "task": json.loads(lease.request_json),
                     }
                 ),

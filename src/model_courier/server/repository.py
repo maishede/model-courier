@@ -63,6 +63,7 @@ class Lease:
     lease_generation: int
     lease_token: str
     lease_until: float
+    capability_id: str
     request_json: str
 
 
@@ -422,6 +423,7 @@ class TaskRepository:
                     lease_generation=generation,
                     lease_token=token,
                     lease_until=lease_until,
+                    capability_id=capability.capability_id,
                     request_json=row["request_json"],
                 )
             connection.commit()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -37,12 +38,14 @@ class AgentState:
         session_token: str,
         runtime: AgentRuntimeController,
         http_client: httpx.Client | None,
+        execution_lock: threading.Lock,
     ) -> None:
         self.store = store
         self.session_token = session_token
         self.inspector = EnvironmentInspector()
         self.runtime = runtime
         self.http_client = http_client
+        self.execution_lock = execution_lock
 
 
 def create_agent_app(
@@ -56,13 +59,22 @@ def create_agent_app(
 ) -> FastAPI:
     store = AgentStore(path)
     store.set_accepting(False)
+    execution_lock = threading.Lock()
     if runtime is None and platform_url and worker_token:
-        runtime = AgentRuntimeController(AgentWorkerLoop(store, platform_url, worker_token))
+        runtime = AgentRuntimeController(
+            AgentWorkerLoop(
+                store,
+                platform_url,
+                worker_token,
+                execution_lock=execution_lock,
+            )
+        )
     state = AgentState(
         store,
         session_token or secrets.token_urlsafe(32),
         runtime or AgentRuntimeController(None),
         http_client,
+        execution_lock,
     )
     app = FastAPI(title="ModelCourier Local Agent", version="0.1.0")
     app.state.model_courier_agent = state
@@ -175,6 +187,8 @@ def create_agent_app(
         binding = agent.store.get_binding(binding_id)
         if binding is None:
             raise HTTPException(status_code=404, detail="model binding not found")
+        verification_digest = agent.store.binding_digest(binding_id)
+        agent.store.mark_verified(binding_id, False)
         content = await request.body()
         if not content:
             return _failed_test("inference", "sample_missing", "verification sample is empty")
@@ -182,62 +196,18 @@ def create_agent_app(
             return _failed_test(
                 "inference", "sample_too_large", "verification sample exceeded the size limit"
             )
-        task = _verification_task(binding, request, len(content))
-        if binding.execution.kind == "python":
-            verification_path = Path(tempfile.gettempdir()) / (
-                f"model-courier-verify-{secrets.token_hex(8)}"
-            )
-            verification_path.write_bytes(content)
-            provider = BindingProvider(binding)
-            try:
-                await run_in_threadpool(provider.validate, task)
-                result = await run_in_threadpool(
-                    provider.execute,
-                    task,
-                    ExecutionContext(
-                        task_id=task.idempotency_key,
-                        deadline=time.time() + 60.0,
-                        input_paths=[verification_path],
-                    ),
-                )
-            except Exception as exc:
-                code = getattr(exc, "code", "verification_failed")
-                return _failed_test("inference", code, str(exc)[:512])
-            finally:
-                provider.close()
-                verification_path.unlink(missing_ok=True)
-            agent.store.mark_verified(binding_id)
-            return {
-                "status": "succeeded",
-                "stage": "inference",
-                "result": result.model_dump(mode="json", by_alias=True),
-            }
-        if binding.execution.kind != "http":
-            return _failed_test(
-                "startup", "managed_http_pending", "managed HTTP verification is not available yet"
-            )
+        await run_in_threadpool(agent.execution_lock.acquire)
         try:
-            adapter = HttpModelAdapter(
-                HttpAdapterConfig.model_validate(binding.execution.config),
-                client=agent.http_client,
+            return await _run_verification(
+                agent,
+                binding,
+                binding_id,
+                request,
+                content,
+                verification_digest,
             )
-            try:
-                result = adapter.execute(task, content)
-            finally:
-                adapter.close()
-        except ValueError:
-            return _failed_test(
-                "configuration", "invalid_http_config", "HTTP configuration is invalid"
-            )
-        except Exception as exc:
-            code = getattr(exc, "code", "verification_failed")
-            return _failed_test("inference", code, str(exc)[:512])
-        agent.store.mark_verified(binding_id)
-        return {
-            "status": "succeeded",
-            "stage": "inference",
-            "result": result.model_dump(mode="json", by_alias=True),
-        }
+        finally:
+            agent.execution_lock.release()
 
     @app.post("/v1/accepting")
     def accepting(
@@ -260,6 +230,78 @@ def create_agent_app(
         return {"events": []}
 
     return app
+
+
+async def _run_verification(
+    agent: AgentState,
+    binding: ModelBinding,
+    binding_id: str,
+    request: Request,
+    content: bytes,
+    verification_digest: str,
+) -> dict:
+    task = _verification_task(binding, request, len(content))
+    if binding.execution.kind == "python":
+        verification_path = Path(tempfile.gettempdir()) / (
+            f"model-courier-verify-{secrets.token_hex(8)}"
+        )
+        verification_path.write_bytes(content)
+        provider = BindingProvider(binding)
+        try:
+            await run_in_threadpool(provider.validate, task)
+            result = await run_in_threadpool(
+                provider.execute,
+                task,
+                ExecutionContext(
+                    task_id=task.idempotency_key,
+                    deadline=time.time() + 60.0,
+                    input_paths=[verification_path],
+                ),
+            )
+        except Exception as exc:
+            code = getattr(exc, "code", "verification_failed")
+            return _failed_test("inference", code, str(exc)[:512])
+        finally:
+            provider.close()
+            verification_path.unlink(missing_ok=True)
+        if not agent.store.mark_verified(binding_id, expected_digest=verification_digest):
+            return _failed_test(
+                "inference", "binding_changed", "model configuration changed during verification"
+            )
+        return {
+            "status": "succeeded",
+            "stage": "inference",
+            "result": result.model_dump(mode="json", by_alias=True),
+        }
+    if binding.execution.kind != "http":
+        return _failed_test(
+            "startup", "managed_http_pending", "managed HTTP verification is not available yet"
+        )
+    try:
+        adapter = HttpModelAdapter(
+            HttpAdapterConfig.model_validate(binding.execution.config),
+            client=agent.http_client,
+        )
+        try:
+            result = await run_in_threadpool(adapter.execute, task, content)
+        finally:
+            adapter.close()
+    except ValueError:
+        return _failed_test(
+            "configuration", "invalid_http_config", "HTTP configuration is invalid"
+        )
+    except Exception as exc:
+        code = getattr(exc, "code", "verification_failed")
+        return _failed_test("inference", code, str(exc)[:512])
+    if not agent.store.mark_verified(binding_id, expected_digest=verification_digest):
+        return _failed_test(
+            "inference", "binding_changed", "model configuration changed during verification"
+        )
+    return {
+        "status": "succeeded",
+        "stage": "inference",
+        "result": result.model_dump(mode="json", by_alias=True),
+    }
 
 
 def _failed_test(stage: str, code: str, message: str) -> dict:

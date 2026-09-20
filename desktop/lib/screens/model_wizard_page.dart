@@ -179,10 +179,12 @@ class _ModelFormPageState extends State<ModelFormPage> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
     final isHttp = widget.kind == ModelConnectionKind.http;
-    final bindingId = _serviceId.text.trim().toLowerCase().replaceAll(
+    final serviceSlug = _serviceId.text.trim().toLowerCase().replaceAll(
       RegExp(r'[^a-z0-9._-]+'),
       '-',
     );
+    final bindingId =
+        '$serviceSlug-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     final config = isHttp
         ? {
             'base_url': _baseUrl.text.trim(),

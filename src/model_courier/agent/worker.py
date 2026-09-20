@@ -14,7 +14,7 @@ from .store import AgentStore
 def build_binding_factory(store: AgentStore) -> ProviderFactory:
     factory = ProviderFactory()
     for binding in store.list_bindings():
-        if not binding.enabled:
+        if not binding.enabled or not store.is_verified(binding.binding_id):
             continue
         provider = BindingProvider(binding)
         factory.register(
@@ -39,6 +39,7 @@ class AgentWorkerLoop:
         request_timeout: float = 30.0,
         execution_timeout: float = 600.0,
         heartbeat_seconds: float = 30.0,
+        execution_lock: threading.Lock | None = None,
     ) -> None:
         self.store = store
         self.config = WorkerConfig(
@@ -49,7 +50,13 @@ class AgentWorkerLoop:
             execution_timeout=execution_timeout,
             heartbeat_seconds=heartbeat_seconds,
         )
+        self.execution_lock = execution_lock or threading.Lock()
 
     def run_forever(self, stop_event: threading.Event) -> None:
         runtime = WorkerRuntime(self.config, build_binding_factory(self.store))
-        runtime.run_forever(stop_event)
+        runtime.register()
+        while not stop_event.is_set():
+            with self.execution_lock:
+                outcome = runtime.run_once()
+            if outcome.status == "idle":
+                stop_event.wait(min(1.0, self.config.poll_seconds))

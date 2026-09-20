@@ -76,6 +76,7 @@ def test_python_binding_provider_rejects_missing_executable() -> None:
 def test_binding_factory_registers_only_enabled_bindings(tmp_path: Path) -> None:
     store = AgentStore(tmp_path / "agent.sqlite3")
     store.save_binding(http_binding())
+    store.mark_verified("local-http")
     store.save_binding(
         http_binding().model_copy(update={"binding_id": "disabled", "enabled": False})
     )
@@ -83,6 +84,30 @@ def test_binding_factory_registers_only_enabled_bindings(tmp_path: Path) -> None
     factory = build_binding_factory(store)
 
     assert [capability.capability_id for capability in factory.capabilities()] == ["local-http"]
+
+
+def test_binding_factory_excludes_enabled_but_unverified_bindings(tmp_path: Path) -> None:
+    store = AgentStore(tmp_path / "agent.sqlite3")
+    store.save_binding(http_binding())
+    store.save_binding(
+        http_binding().model_copy(update={"binding_id": "verified"})
+    )
+    store.mark_verified("verified")
+
+    factory = build_binding_factory(store)
+
+    assert [capability.capability_id for capability in factory.capabilities()] == ["verified"]
+
+
+def test_verification_digest_cannot_be_marked_after_binding_changes(tmp_path: Path) -> None:
+    store = AgentStore(tmp_path / "agent.sqlite3")
+    original = http_binding()
+    store.save_binding(original)
+    digest = store.binding_digest(original.binding_id)
+    store.save_binding(original.model_copy(update={"model_name": "changed"}))
+
+    assert store.mark_verified(original.binding_id, expected_digest=digest) is False
+    assert store.is_verified(original.binding_id) is False
 
 
 def test_python_provider_uses_remaining_execution_deadline(tmp_path: Path) -> None:

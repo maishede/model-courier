@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -195,6 +198,136 @@ async def test_http_verification_runs_inference_before_marking_enabled(
     assert verification.json()["stage"] == "inference"
     assert verification.json()["result"]["json"] == {"text": "verified"}
     assert app.state.model_courier_agent.store.has_verified_enabled_binding() is True
+
+
+@pytest.mark.asyncio
+async def test_failed_reverification_clears_previous_verified_state(tmp_path: Path) -> None:
+    token = "session-token-1234567890"
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(500, json={"error": "offline"})
+        )
+    )
+    app = create_agent_app(tmp_path / "agent.sqlite3", session_token=token, http_client=client)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {token}"}
+    app.state.model_courier_agent.store.save_binding(binding())
+    app.state.model_courier_agent.store.mark_verified("local-funasr")
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as api_client:
+        verification = await api_client.post(
+            "/v1/models/local-funasr/verify",
+            content=b"sample",
+            headers={**headers, "Content-Type": "audio/wav"},
+        )
+
+    assert verification.json()["status"] == "failed"
+    assert app.state.model_courier_agent.store.is_verified("local-funasr") is False
+
+
+@pytest.mark.asyncio
+async def test_http_verification_runs_off_event_loop(tmp_path: Path) -> None:
+    token = "session-token-1234567890"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return httpx.Response(200, json={"result": {"text": "verified"}})
+        return httpx.Response(500, json={"error": "called on event loop"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    app = create_agent_app(tmp_path / "agent.sqlite3", session_token=token, http_client=client)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as api_client:
+        await api_client.post("/v1/models", json=binding().model_dump(mode="json"), headers=headers)
+        verification = await api_client.post(
+            "/v1/models/local-funasr/verify",
+            content=b"sample",
+            headers={**headers, "Content-Type": "audio/wav"},
+        )
+
+    assert verification.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_concurrent_verifications_are_serialized(tmp_path: Path) -> None:
+    token = "session-token-1234567890"
+    active = 0
+    max_active = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        time.sleep(0.05)
+        active -= 1
+        return httpx.Response(200, json={"result": {"text": "verified"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    app = create_agent_app(tmp_path / "agent.sqlite3", session_token=token, http_client=client)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as api_client:
+        await api_client.post("/v1/models", json=binding().model_dump(mode="json"), headers=headers)
+        results = await asyncio.gather(
+            api_client.post(
+                "/v1/models/local-funasr/verify",
+                content=b"sample",
+                headers={**headers, "Content-Type": "audio/wav"},
+            ),
+            api_client.post(
+                "/v1/models/local-funasr/verify",
+                content=b"sample",
+                headers={**headers, "Content-Type": "audio/wav"},
+            ),
+        )
+
+    assert [result.status_code for result in results] == [200, 200]
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_binding_change_during_verification_cannot_mark_new_config_verified(
+    tmp_path: Path,
+) -> None:
+    token = "session-token-1234567890"
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        started.set()
+        release.wait(1)
+        return httpx.Response(200, json={"result": {"text": "verified"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    app = create_agent_app(tmp_path / "agent.sqlite3", session_token=token, http_client=client)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {token}"}
+    changed = binding().model_copy(update={"model_name": "changed"})
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as api_client:
+        await api_client.post("/v1/models", json=binding().model_dump(mode="json"), headers=headers)
+        verification_task = asyncio.create_task(
+            api_client.post(
+                "/v1/models/local-funasr/verify",
+                content=b"sample",
+                headers={**headers, "Content-Type": "audio/wav"},
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        saved = await api_client.post(
+            "/v1/models", json=changed.model_dump(mode="json"), headers=headers
+        )
+        release.set()
+        verification = await verification_task
+
+    assert saved.status_code == 201
+    assert verification.json()["error"]["code"] == "binding_changed"
+    assert app.state.model_courier_agent.store.is_verified("local-funasr") is False
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,8 @@ class AgentRuntimeController:
             raise RuntimeUnavailable("platform Worker is not configured")
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                if self._stop_event.is_set():
+                    raise RuntimeUnavailable("worker is still stopping")
                 return
             self._stop_event = threading.Event()
             self._state = "starting"

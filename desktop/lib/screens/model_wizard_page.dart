@@ -71,6 +71,7 @@ class _ModelFormPageState extends State<ModelFormPage> {
   final _path = TextEditingController(text: '/transcribe');
   final _responsePath = TextEditingController(text: 'result.text');
   final _executable = TextEditingController();
+  final _arguments = TextEditingController();
   bool _saving = false;
 
   @override
@@ -83,6 +84,7 @@ class _ModelFormPageState extends State<ModelFormPage> {
       _path,
       _responsePath,
       _executable,
+      _arguments,
     ]) {
       controller.dispose();
     }
@@ -135,12 +137,22 @@ class _ModelFormPageState extends State<ModelFormPage> {
                 decoration: const InputDecoration(labelText: '响应文本路径'),
                 validator: _required,
               ),
-            ] else
+            ] else ...[
               TextFormField(
                 controller: _executable,
                 decoration: const InputDecoration(labelText: 'Python 可执行文件路径'),
                 validator: _required,
               ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _arguments,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Runner 参数（每行一个）',
+                  hintText: '例如：\nC:\\models\\funasr_runner.py',
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: _saving ? null : _save,
@@ -177,7 +189,14 @@ class _ModelFormPageState extends State<ModelFormPage> {
             'path': _path.text.trim(),
             'response_path': _responsePath.text.trim(),
           }
-        : {'executable': _executable.text.trim()};
+        : {
+            'executable': _executable.text.trim(),
+            'arguments': _arguments.text
+                .split('\n')
+                .map((argument) => argument.trim())
+                .where((argument) => argument.isNotEmpty)
+                .toList(),
+          };
     final binding = {
       'binding_id': bindingId,
       'display_name': _name.text.trim(),

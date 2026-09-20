@@ -22,13 +22,16 @@ def test_audio_task_round_trips_with_requirements() -> None:
     task = TaskEnvelope(
         task_type="audio.transcribe.v1",
         input_artifacts=[artifact()],
-        requires=TaskRequirements(provider="funasr", model="paraformer"),
+        requires=TaskRequirements(
+            provider="funasr", model="paraformer", service_id="desktop-gpu-1"
+        ),
         options={"language": "zh"},
         idempotency_key="device-1:sample-1",
     )
 
     assert task.model_dump(mode="json")["task_type"] == "audio.transcribe.v1"
     assert task.requires.provider == "funasr"
+    assert task.requires.service_id == "desktop-gpu-1"
     assert len(canonical_json_digest(task)) == 64
 
 
@@ -72,6 +75,7 @@ def test_capability_and_result_contracts_are_strict() -> None:
         provider="funasr",
         models=["paraformer"],
         formats=["audio/wav"],
+        service_id="desktop-gpu-1",
     )
     result = ProviderResult(
         schema_version="audio.transcribe.v1",
@@ -86,5 +90,6 @@ def test_capability_and_result_contracts_are_strict() -> None:
     )
 
     assert capability.max_concurrency == 1
+    assert capability.service_id == "desktop-gpu-1"
     assert result.json["text"] == "你好"
     assert error.retryable is True

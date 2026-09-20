@@ -19,6 +19,8 @@ LEASE_SECONDS = 600
 HEARTBEAT_SECONDS = 30
 MAX_ATTEMPTS = 3
 RESULT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+WORKER_ONLINE_SECONDS = 30
+WORKER_STALE_SECONDS = 90
 
 
 class RepositoryError(RuntimeError):
@@ -178,6 +180,22 @@ class TaskRepository:
             CapabilityManifest.model_validate(item)
             for item in json.loads(row["capabilities_json"])
         ]
+
+    def worker_presence(self, worker_id: str, now: float | None = None) -> str:
+        now = _now() if now is None else now
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT last_seen_at FROM workers WHERE id = ? AND revoked_at IS NULL",
+                (worker_id,),
+            ).fetchone()
+        if row is None or row["last_seen_at"] is None:
+            raise NotFoundError("worker not found")
+        age = max(0.0, now - row["last_seen_at"])
+        if age <= WORKER_ONLINE_SECONDS:
+            return "online"
+        if age < WORKER_STALE_SECONDS:
+            return "stale"
+        return "offline"
 
     def get_task(self, owner_id: str, task_id: str) -> TaskRecord:
         with self.database.connection() as connection:
@@ -339,12 +357,15 @@ class TaskRepository:
         requires = request.get("requires") or {}
         requested_provider = requires.get("provider")
         requested_model = requires.get("model")
+        requested_service = requires.get("service_id")
         requested_formats = set(requires.get("formats") or [])
         input_formats = {item.get("mime") for item in request.get("input_artifacts", [])}
         for capability in capabilities:
             if capability.task_type != row["task_type"]:
                 continue
             if requested_provider and capability.provider != requested_provider:
+                continue
+            if requested_service and capability.service_id != requested_service:
                 continue
             if requested_model and requested_model not in capability.models:
                 continue

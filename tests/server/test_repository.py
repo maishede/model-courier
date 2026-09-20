@@ -188,3 +188,49 @@ def test_successful_task_releases_input_artifact_metadata(tmp_path: Path) -> Non
     assert repo.remove_input_artifacts("owner-1", task.id) == ["input-1"]
     with pytest.raises(NotFoundError):
         repo.input_artifact_path("owner-1", task.id)
+
+
+def test_service_id_routes_to_the_requested_desktop_worker(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    first = CapabilityManifest(
+        capability_id="worker-1:wrong-service",
+        task_type="audio.transcribe.v1",
+        provider="mock",
+        models=["mock-1"],
+        formats=["audio/wav"],
+        service_id="desktop-gpu-2",
+    )
+    requested = TaskEnvelope(
+        task_type="audio.transcribe.v1",
+        input_artifacts=[ArtifactRef(name="input.wav", mime="audio/wav", size_bytes=3)],
+        requires=TaskRequirements(
+            provider="mock", model="mock-1", service_id="desktop-gpu-1"
+        ),
+        idempotency_key="service-route-2",
+    )
+    digest = "e" * 64
+    task = repo.create_uploading("owner-1", "device-1", requested, digest, now=1000)
+    repo.finalize_and_enqueue(
+        task.id,
+        ArtifactRef(
+            artifact_id="input-service",
+            name="input.wav",
+            mime="audio/wav",
+            size_bytes=3,
+            sha256="f" * 64,
+        ),
+        digest,
+        now=1000,
+    )
+
+    assert repo.claim_next("worker-1", [first], now=1001) is None
+    matching = first.model_copy(update={"service_id": "desktop-gpu-1"})
+    assert repo.claim_next("worker-1", [matching], now=1001) is not None
+
+
+def test_worker_presence_has_online_and_offline_cutoffs(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+
+    assert repo.worker_presence("worker-1", now=1029) == "online"
+    assert repo.worker_presence("worker-1", now=1030) == "online"
+    assert repo.worker_presence("worker-1", now=1090) == "offline"

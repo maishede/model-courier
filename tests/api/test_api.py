@@ -70,12 +70,14 @@ async def test_device_to_worker_result_flow(tmp_path: Path) -> None:
                         "provider": "mock",
                         "models": ["mock-1"],
                         "formats": ["image/jpeg"],
+                        "service_id": "desktop-gpu-1",
                     }
                 ]
             },
             headers=worker_headers,
         )
         assert registration.status_code == 200
+        assert registration.json()["capabilities"][0]["service_id"] == "desktop-gpu-1"
 
         polled = await client.post(
             "/v1/workers/poll", json={"wait_seconds": 0}, headers=worker_headers

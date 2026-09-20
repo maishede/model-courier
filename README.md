@@ -173,10 +173,14 @@ The Windows-first Flutter shell lives in `desktop/`. It talks to a local
 Python Agent over an authenticated loopback HTTP API; model frameworks remain
 inside their selected Conda/Python environments or user-managed HTTP services.
 
-Start the Agent during development:
+Start the Agent during development. Supplying the platform URL and Worker token
+enables the real outbound Worker loop; omitting them starts the local API in
+configuration-only mode and the Agent will refuse to claim tasks.
 
 ```bash
-python -c "import uvicorn; from model_courier.agent.api import create_agent_app; uvicorn.run(create_agent_app('data/agent.sqlite3', session_token='dev-session-token'), host='127.0.0.1', port=8765)"
+export MODEL_COURIER_PLATFORM_URL=https://relay.example.com
+export MODEL_COURIER_WORKER_TOKEN=WORKER_TOKEN
+python -c "import os, uvicorn; from model_courier.agent.api import create_agent_app; uvicorn.run(create_agent_app('data/agent.sqlite3', session_token='dev-session-token', platform_url=os.environ['MODEL_COURIER_PLATFORM_URL'], worker_token=os.environ['MODEL_COURIER_WORKER_TOKEN']), host='127.0.0.1', port=8765)"
 ```
 
 Run the Flutter shell with the session token passed by the Agent launcher:

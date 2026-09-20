@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 
 import '../agent_api.dart';
 import 'model_wizard_page.dart';
@@ -15,6 +16,7 @@ class OverviewPage extends StatefulWidget {
 class _OverviewPageState extends State<OverviewPage> {
   bool _connected = false;
   bool _accepting = false;
+  String _runtime = 'unknown';
   bool _loading = true;
   String? _error;
   List<ModelSummary> _models = const [];
@@ -32,10 +34,13 @@ class _OverviewPageState extends State<OverviewPage> {
     });
     try {
       final connected = await widget.api.sessionOk();
+      final status = connected ? await widget.api.status() : null;
       final models = connected ? await widget.api.listModels() : <ModelSummary>[];
       if (!mounted) return;
       setState(() {
         _connected = connected;
+        _accepting = status?.accepting ?? false;
+        _runtime = status?.runtime ?? 'unknown';
         _models = models;
         _loading = false;
       });
@@ -58,6 +63,47 @@ class _OverviewPageState extends State<OverviewPage> {
     }
   }
 
+  Future<void> _verifyModel(ModelSummary model) async {
+    const groups = [
+      XTypeGroup(
+        label: '音频或图片样本',
+        extensions: ['wav', 'mp3', 'm4a', 'jpg', 'jpeg', 'png'],
+      ),
+    ];
+    final file = await openFile(acceptedTypeGroups: groups);
+    if (file == null || !mounted) return;
+    try {
+      final result = await widget.api.verifyModel(
+        model.bindingId,
+        await file.readAsBytes(),
+        _mimeFor(file.name),
+      );
+      if (!mounted) return;
+      final succeeded = result['status'] == 'succeeded';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            succeeded ? '真实推理验证通过' : '验证失败：${result['error'] ?? '请检查模型配置'}',
+          ),
+        ),
+      );
+      await _refresh();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('验证失败：$error')));
+      }
+    }
+  }
+
+  String _mimeFor(String name) {
+    final extension = name.split('.').last.toLowerCase();
+    if (extension == 'wav') return 'audio/wav';
+    if (extension == 'mp3') return 'audio/mpeg';
+    if (extension == 'm4a') return 'audio/mp4';
+    if (extension == 'png') return 'image/png';
+    return 'image/jpeg';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -67,7 +113,11 @@ class _OverviewPageState extends State<OverviewPage> {
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
-            _StatusCard(connected: _connected, accepting: _accepting),
+            _StatusCard(
+              connected: _connected,
+              accepting: _accepting,
+              runtime: _runtime,
+            ),
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
@@ -100,8 +150,20 @@ class _OverviewPageState extends State<OverviewPage> {
                   child: ListTile(
                     leading: Icon(model.enabled ? Icons.check_circle : Icons.pause_circle),
                     title: Text(model.displayName),
-                    subtitle: Text(model.serviceId),
-                    trailing: Text(model.enabled ? '已启用' : '未启用'),
+                    subtitle: Text(
+                      '${model.serviceId} · ${model.verified ? '已验证' : '待验证'}',
+                    ),
+                    trailing: Wrap(
+                      spacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(model.enabled ? '已启用' : '未启用'),
+                        TextButton(
+                          onPressed: () => _verifyModel(model),
+                          child: const Text('验证'),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -120,10 +182,15 @@ class _OverviewPageState extends State<OverviewPage> {
 }
 
 class _StatusCard extends StatelessWidget {
-  const _StatusCard({required this.connected, required this.accepting});
+  const _StatusCard({
+    required this.connected,
+    required this.accepting,
+    required this.runtime,
+  });
 
   final bool connected;
   final bool accepting;
+  final String runtime;
 
   @override
   Widget build(BuildContext context) {
@@ -136,6 +203,7 @@ class _StatusCard extends StatelessWidget {
           children: [
             _Status(label: '本地 Agent', value: connected ? '已连接' : '未连接'),
             _Status(label: '接单状态', value: accepting ? '接单中' : '已暂停'),
+            _Status(label: 'Worker', value: runtime),
           ],
         ),
       ),

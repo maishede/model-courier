@@ -81,6 +81,13 @@ class AgentStore:
                 (int(verified), binding_id),
             )
 
+    def is_verified(self, binding_id: str) -> bool:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT verified FROM model_bindings WHERE binding_id = ?", (binding_id,)
+            ).fetchone()
+        return bool(row["verified"]) if row else False
+
     def has_verified_enabled_binding(self) -> bool:
         with self.connection() as connection:
             row = connection.execute(

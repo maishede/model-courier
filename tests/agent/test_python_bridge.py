@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from model_courier.agent.python_bridge import BridgeError, PythonBridge
+from model_courier.agent.python_bridge import BridgeError, PythonBridge, _redact
 
 
 def write_bridge_script(tmp_path: Path, body: str) -> Path:
@@ -51,6 +51,22 @@ for line in sys.stdin:
         )
 
 
+def test_bridge_rejects_oversized_diagnostics(tmp_path: Path) -> None:
+    script = write_bridge_script(
+        tmp_path,
+        """
+import sys
+sys.stderr.write('x' * 128)
+sys.stderr.flush()
+""",
+    )
+
+    with pytest.raises(BridgeError, match="message_too_large"):
+        PythonBridge(Path(sys.executable), [str(script)], max_message_bytes=64).run(
+            {"request_id": "req-1"}
+        )
+
+
 def test_bridge_rejects_oversized_request_before_starting_child(tmp_path: Path) -> None:
     script = write_bridge_script(tmp_path, "raise SystemExit(0)\n")
 
@@ -77,3 +93,18 @@ raise SystemExit(3)
 
     assert caught.value.code == "bridge_exit"
     assert "secret-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        '{"token": "secret-token"}',
+        'Authorization: Bearer secret-token',
+        "password=secret-token",
+    ],
+)
+def test_redaction_covers_json_and_header_secret_formats(diagnostic: str) -> None:
+    redacted = _redact(diagnostic)
+
+    assert "secret-token" not in redacted
+    assert "[redacted]" in redacted

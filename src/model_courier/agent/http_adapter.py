@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -58,7 +59,12 @@ class HttpModelAdapter:
     def __init__(self, config: HttpAdapterConfig, client: httpx.Client | None = None) -> None:
         self.config = config
         self.url = f"{config.base_url}{config.path}"
+        self._owns_client = client is None
         self.client = client or httpx.Client(base_url=config.base_url)
+
+    def close(self) -> None:
+        if self._owns_client:
+            self.client.close()
 
     def check(self) -> CheckResult:
         try:
@@ -67,10 +73,11 @@ class HttpModelAdapter:
             return CheckResult(False, error_code="timeout")
         except httpx.HTTPError:
             return CheckResult(False, error_code="connection_error")
+        reachable = response.status_code < 500
         return CheckResult(
-            response.is_success,
+            reachable,
             response.status_code,
-            None if response.is_success else "http_error",
+            None if reachable else "http_error",
         )
 
     def execute(self, task: TaskEnvelope, input_bytes: bytes) -> ProviderResult:
@@ -85,30 +92,29 @@ class HttpModelAdapter:
             )
         }
         try:
-            response = self.client.request(
+            with self.client.stream(
                 self.config.method,
                 self.url,
                 data=data,
                 files=files,
                 timeout=self.config.timeout,
-            )
+            ) as response:
+                if not response.is_success:
+                    raise HttpAdapterError(
+                        "http_error",
+                        f"HTTP service returned status {response.status_code}",
+                        retryable=response.status_code >= 500,
+                    )
+                content = _read_response(response, self.config.max_response_bytes)
         except httpx.TimeoutException as exc:
             raise HttpAdapterError("timeout", "HTTP request timed out", retryable=True) from exc
         except httpx.HTTPError as exc:
             raise HttpAdapterError(
                 "connection_error", "HTTP request failed", retryable=True
             ) from exc
-        if len(response.content) > self.config.max_response_bytes:
-            raise HttpAdapterError("response_too_large", "HTTP response exceeded the size limit")
-        if not response.is_success:
-            raise HttpAdapterError(
-                "http_error",
-                f"HTTP service returned status {response.status_code}",
-                retryable=response.status_code >= 500,
-            )
         try:
-            document = response.json()
-        except ValueError as exc:
+            document = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HttpAdapterError("invalid_json", "HTTP service returned invalid JSON") from exc
         value = _extract(document, self.config.response_path)
         if value is _MISSING:
@@ -128,6 +134,17 @@ class HttpModelAdapter:
 
 
 _MISSING = object()
+
+
+def _read_response(response: httpx.Response, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_bytes():
+        size += len(chunk)
+        if size > max_bytes:
+            raise HttpAdapterError("response_too_large", "HTTP response exceeded the size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _extract(document: Any, path: str) -> Any:

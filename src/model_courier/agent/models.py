@@ -34,4 +34,5 @@ class ModelBinding(AgentModel):
     service_id: str = Field(min_length=1, max_length=128)
     execution: ExecutionProfile
     model_name: str = Field(min_length=1, max_length=256)
+    task_type: Literal["audio.transcribe.v1", "vision.detect.v1"] = "audio.transcribe.v1"
     enabled: bool = False

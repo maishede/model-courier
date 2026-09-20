@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-_SECRET = re.compile(r"(?i)(token|secret|password|authorization)(\s*[=:]\s*)[^,;\s]+")
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)(\bauthorization\b\s*:\s*(?:bearer|basic)\s+)[^\s,;]+"
+)
+_SECRET = re.compile(
+    r"(?i)([\"']?(?:token|secret|password|authorization)[\"']?\s*[=:]\s*)"
+    r"(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;}\]]+)"
+)
 
 
 class BridgeError(RuntimeError):
@@ -47,18 +55,79 @@ class PythonBridge:
                 stderr=subprocess.PIPE,
                 shell=False,
             )
-            stdout, stderr = process.communicate(payload + b"\n", timeout=self.timeout)
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            process.communicate()
-            raise BridgeError("bridge_timeout", "adapter exceeded its execution deadline") from exc
         except OSError as exc:
             raise BridgeError(
                 "bridge_start_failed", "adapter process could not be started"
             ) from exc
 
-        if len(stdout) > self.max_message_bytes:
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stream_sizes = {"stdout": 0, "stderr": 0}
+        output_exceeded = threading.Event()
+
+        stdout_thread = threading.Thread(
+            target=_capture_stream,
+            args=(
+                process.stdout,
+                "stdout",
+                self.max_message_bytes,
+                stdout_chunks,
+                stream_sizes,
+                output_exceeded,
+            ),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_capture_stream,
+            args=(
+                process.stderr,
+                "stderr",
+                self.max_message_bytes,
+                stderr_chunks,
+                stream_sizes,
+                output_exceeded,
+            ),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        def write_request() -> None:
+            try:
+                assert process.stdin is not None
+                process.stdin.write(payload + b"\n")
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                return
+
+        writer_thread = threading.Thread(target=write_request, daemon=True)
+        writer_thread.start()
+        deadline = time.monotonic() + self.timeout
+        timed_out = False
+        while process.poll() is None:
+            if output_exceeded.is_set():
+                process.kill()
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                process.kill()
+                break
+            time.sleep(0.01)
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        writer_thread.join(timeout=1.0)
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+
+        if timed_out:
+            raise BridgeError("bridge_timeout", "adapter exceeded its execution deadline")
+        if output_exceeded.is_set():
             raise BridgeError("message_too_large", "adapter response exceeded the size limit")
+        stdout = b"".join(stdout_chunks)
+        stderr = b"".join(stderr_chunks)
         if process.returncode != 0:
             detail = _redact(stderr.decode("utf-8", errors="replace")[:512])
             suffix = f": {detail}" if detail else ""
@@ -80,5 +149,28 @@ class PythonBridge:
         return response
 
 
+def _capture_stream(
+    stream: Any,
+    name: str,
+    max_message_bytes: int,
+    chunks: list[bytes],
+    sizes: dict[str, int],
+    exceeded: threading.Event,
+) -> None:
+    total = 0
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            break
+        previous = total
+        total += len(chunk)
+        if previous < max_message_bytes:
+            chunks.append(chunk[: max_message_bytes - previous])
+        if total > max_message_bytes:
+            exceeded.set()
+    sizes[name] = total
+
+
 def _redact(value: str) -> str:
-    return _SECRET.sub(r"\1\2[redacted]", value)
+    value = _AUTHORIZATION_HEADER.sub(r"\1[redacted]", value)
+    return _SECRET.sub(r"\1[redacted]", value)

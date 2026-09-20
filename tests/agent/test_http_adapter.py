@@ -77,3 +77,47 @@ def test_http_adapter_enforces_response_limit_and_status() -> None:
     )
     with pytest.raises(HttpAdapterError, match="http_error"):
         adapter.execute(task(), b"wav")
+
+
+def test_http_adapter_stops_reading_after_response_limit() -> None:
+    class BoundedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"x" * 33
+            raise AssertionError("adapter read beyond response limit")
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=BoundedStream())
+        )
+    )
+    adapter = HttpModelAdapter(
+        HttpAdapterConfig(
+            base_url="http://127.0.0.1:9000", path="/transcribe", max_response_bytes=32
+        ),
+        client=client,
+    )
+
+    with pytest.raises(HttpAdapterError, match="response_too_large"):
+        adapter.execute(task(), b"wav")
+
+
+def test_http_adapter_closes_owned_client() -> None:
+    adapter = HttpModelAdapter(HttpAdapterConfig(base_url="http://127.0.0.1:9000"))
+
+    adapter.close()
+
+    assert adapter.client.is_closed is True
+
+
+def test_http_adapter_check_accepts_reachable_post_only_service() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(405))
+    )
+    adapter = HttpModelAdapter(
+        HttpAdapterConfig(base_url="http://127.0.0.1:9000"), client=client
+    )
+
+    result = adapter.check()
+
+    assert result.available is True
+    assert result.status_code == 405

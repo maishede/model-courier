@@ -66,3 +66,26 @@ async def test_accepting_requires_a_verified_enabled_model(tmp_path: Path) -> No
 
     assert test_result.json()["stage"] == "connection"
     assert test_result.json()["error"]["code"] in {"connection_error", "http_error"}
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_plaintext_secret_and_accepting_start_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    token = "session-token-1234567890"
+    app = create_agent_app(tmp_path / "agent.sqlite3", session_token=token)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = binding().model_dump(mode="json")
+    payload["execution"]["config"]["authorization"] = "secret-value"
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+        rejected = await client.post("/v1/models", json=payload, headers=headers)
+        assert rejected.status_code == 422
+        app.state.model_courier_agent.store.save_binding(binding())
+        app.state.model_courier_agent.store.mark_verified("local-funasr")
+        first = await client.post("/v1/accepting", json={"enabled": True}, headers=headers)
+        second = await client.post("/v1/accepting", json={"enabled": True}, headers=headers)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json() == {"accepting": True}

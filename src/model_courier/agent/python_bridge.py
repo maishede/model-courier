@@ -37,6 +37,8 @@ class PythonBridge:
         if not isinstance(request_id, str) or not request_id:
             raise BridgeError("invalid_request", "request_id is required")
         payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(payload) + 1 > self.max_message_bytes:
+            raise BridgeError("message_too_large", "adapter request exceeded the size limit")
         try:
             process = subprocess.Popen(
                 [str(self.executable), *self.arguments],

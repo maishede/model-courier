@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -28,13 +29,16 @@ class EnvironmentInspector:
                 message="Python executable was not found",
             )
 
+        probe_environment = os.environ.copy()
+        probe_environment.update(profile.environment)
+        probe_environment["PYTHONNOUSERSITE"] = "1"
         try:
             completed = subprocess.run(
                 [str(executable), "-c", "import sys; print(sys.version_info[:3])"],
                 capture_output=True,
                 check=False,
                 cwd=str(profile.conda_prefix) if profile.conda_prefix else None,
-                env={**profile.environment, "PYTHONNOUSERSITE": "1"},
+                env=probe_environment,
                 text=True,
                 timeout=10,
                 shell=False,

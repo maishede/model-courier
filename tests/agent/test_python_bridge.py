@@ -51,6 +51,15 @@ for line in sys.stdin:
         )
 
 
+def test_bridge_rejects_oversized_request_before_starting_child(tmp_path: Path) -> None:
+    script = write_bridge_script(tmp_path, "raise SystemExit(0)\n")
+
+    with pytest.raises(BridgeError, match="message_too_large"):
+        PythonBridge(Path(sys.executable), [str(script)], max_message_bytes=32).run(
+            {"request_id": "req-1", "payload": "x" * 128}
+        )
+
+
 def test_bridge_reports_child_failure_without_leaking_secret(tmp_path: Path) -> None:
     script = write_bridge_script(
         tmp_path,

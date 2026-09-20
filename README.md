@@ -166,3 +166,27 @@ rotation, and access control at the deployment boundary.
 ## License
 
 ModelCourier is released under the [MIT License](LICENSE).
+
+## Desktop workbench preview
+
+The Windows-first Flutter shell lives in `desktop/`. It talks to a local
+Python Agent over an authenticated loopback HTTP API; model frameworks remain
+inside their selected Conda/Python environments or user-managed HTTP services.
+
+Start the Agent during development:
+
+```bash
+python -c "import uvicorn; from model_courier.agent.api import create_agent_app; uvicorn.run(create_agent_app('data/agent.sqlite3', session_token='dev-session-token'), host='127.0.0.1', port=8765)"
+```
+
+Run the Flutter shell with the session token passed by the Agent launcher:
+
+```bash
+cd desktop
+flutter pub get
+flutter run -d windows --dart-define=MODEL_COURIER_AGENT_TOKEN=dev-session-token
+```
+
+The shell is an early preview: it includes status, model listing, accepting
+toggle, and the three connection choices. Packaging, tray integration, and
+the full adapter forms are implemented in later desktop milestones.

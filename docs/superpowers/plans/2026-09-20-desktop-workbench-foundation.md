@@ -169,4 +169,3 @@ Run `python -m pytest -q`, `ruff check src tests`, `python -m compileall -q src 
 - [ ] **Step 6: Commit the vertical slice**
 
 Commit with `git add src tests desktop README.md && git commit -m "feat: add loopback agent api and flutter shell"`.
-
